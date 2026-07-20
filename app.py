@@ -152,7 +152,13 @@ def load_and_align(line_bytes: bytes, colored_bytes: bytes,
                    max_dim: int = MAX_PROCESS_DIM
                    ) -> Tuple[np.ndarray, np.ndarray]:
     """Load both images, force them to the SAME size (the line-art's
-    aspect ratio wins), and cap the long edge for fast processing."""
+    aspect ratio wins), and cap the long edge for fast processing.
+
+    Width and height are rounded DOWN to the nearest even number —
+    libx264 with yuv420p (used for the final MP4) requires both
+    dimensions to be even, or ffmpeg exits immediately and every
+    later write raises "Broken pipe".
+    """
     line_img = Image.open(io.BytesIO(line_bytes)).convert("RGB")
     colored_img = Image.open(io.BytesIO(colored_bytes)).convert("RGB")
 
@@ -161,6 +167,8 @@ def load_and_align(line_bytes: bytes, colored_bytes: bytes,
     if long_edge > max_dim:
         scale = max_dim / long_edge
         w, h = int(round(w * scale)), int(round(h * scale))
+    w -= w % 2
+    h -= h % 2
 
     line_img = line_img.resize((w, h), Image.LANCZOS)
     colored_img = colored_img.resize((w, h), Image.LANCZOS)
