@@ -248,12 +248,21 @@ def order_regions(regions: List[Dict], mode: str) -> List[Dict]:
     return ordered
 
 
-def render_frames(line_rgb: np.ndarray, colored_rgb: np.ndarray,
-                  ordered_regions: List[Dict], all_fillable_mask: np.ndarray,
-                  duration_sec: float, fps: int, show_cursor: bool,
-                  hold_sec: float = 1.5) -> List[np.ndarray]:
-    """Progressively reveal regions onto a persistent canvas and
-    return the full list of RGB frames for video encoding.
+def render_and_encode_video(line_rgb: np.ndarray, colored_rgb: np.ndarray,
+                            ordered_regions: List[Dict],
+                            all_fillable_mask: np.ndarray,
+                            duration_sec: float, fps: int, show_cursor: bool,
+                            hold_sec: float = 1.5,
+                            progress_cb=None) -> bytes:
+    """Progressively reveal regions onto a persistent canvas, writing
+    each frame straight to the video encoder as it's produced.
+
+    Earlier versions built a Python list of every frame before
+    encoding — for a 60s/20fps video that's 1200+ full-resolution
+    frames held in memory at once, easily exceeding Streamlit Cloud's
+    free-tier RAM and crashing the whole process. Streaming frames to
+    the ffmpeg writer one at a time keeps memory flat regardless of
+    video length.
 
     After the animated per-region reveal, a catch-all pass colors any
     remaining fine detail that was too small to animate individually
@@ -264,53 +273,50 @@ def render_frames(line_rgb: np.ndarray, colored_rgb: np.ndarray,
     n = len(ordered_regions)
     total_frames = max(1, int(duration_sec * fps))
     hold_frames = int(hold_sec * fps)
+    grand_total = total_frames + hold_frames
 
     canvas = line_rgb.copy()
-    frames = []
     revealed_so_far = 0
     cursor_radius = max(6, int(min(w, h) * 0.02))
 
-    for f in range(total_frames):
-        progress = f / max(1, total_frames - 1)
-        target_revealed = min(n, int(math.ceil(progress * n)))
-
-        for i in range(revealed_so_far, target_revealed):
-            mask = ordered_regions[i]["mask"]
-            canvas[mask] = colored_rgb[mask]
-        revealed_so_far = target_revealed
-
-        frame = canvas.copy()
-        if show_cursor and revealed_so_far > 0:
-            cx, cy = ordered_regions[revealed_so_far - 1]["centroid"]
-            cv2.circle(frame, (cx, cy), cursor_radius,
-                      (255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
-            cv2.circle(frame, (cx, cy), max(2, cursor_radius // 3),
-                      (60, 60, 60), thickness=-1, lineType=cv2.LINE_AA)
-        frames.append(frame)
-
-    # Catch-all: fill any fine detail skipped by the per-region
-    # animation so the finished artwork is a complete, exact match.
-    canvas[all_fillable_mask] = colored_rgb[all_fillable_mask]
-
-    # Hold the finished artwork for a beat before the video ends.
-    final_frame = canvas.copy()
-    for _ in range(hold_frames):
-        frames.append(final_frame)
-
-    return frames
-
-
-def write_video_bytes(frames: List[np.ndarray], fps: int) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
     writer = imageio.get_writer(tmp_path, fps=fps, codec="libx264",
                                 format="FFMPEG", quality=8,
                                 macro_block_size=None)
     try:
-        for frame in frames:
+        for f in range(total_frames):
+            progress = f / max(1, total_frames - 1)
+            target_revealed = min(n, int(math.ceil(progress * n)))
+
+            for i in range(revealed_so_far, target_revealed):
+                mask = ordered_regions[i]["mask"]
+                canvas[mask] = colored_rgb[mask]
+            revealed_so_far = target_revealed
+
+            frame = canvas.copy()
+            if show_cursor and revealed_so_far > 0:
+                cx, cy = ordered_regions[revealed_so_far - 1]["centroid"]
+                cv2.circle(frame, (cx, cy), cursor_radius,
+                          (255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+                cv2.circle(frame, (cx, cy), max(2, cursor_radius // 3),
+                          (60, 60, 60), thickness=-1, lineType=cv2.LINE_AA)
             writer.append_data(frame)
+            if progress_cb and f % 5 == 0:
+                progress_cb(f / grand_total)
+
+        # Catch-all: fill any fine detail skipped by the per-region
+        # animation so the finished artwork is a complete, exact match.
+        canvas[all_fillable_mask] = colored_rgb[all_fillable_mask]
+
+        # Hold the finished artwork for a beat before the video ends.
+        for hf in range(hold_frames):
+            writer.append_data(canvas)
+            if progress_cb and hf % 5 == 0:
+                progress_cb((total_frames + hf) / grand_total)
     finally:
         writer.close()
+
     with open(tmp_path, "rb") as f:
         data = f.read()
     return data
@@ -445,22 +451,23 @@ if go:
             )
             st.stop()
 
-        progress.progress(0.25, text=f"Found {len(regions)} regions — "
-                                     "sampling colors…")
+        progress.progress(0.1, text=f"Found {len(regions)} regions — "
+                                    "sampling colors…")
         sample_colors(colored_rgb, regions)
         ordered = order_regions(regions, order_mode)
 
-        progress.progress(0.45, text="Rendering frames…")
-        frames = render_frames(line_rgb, colored_rgb, ordered,
-                               all_fillable_mask, duration_sec, fps,
-                               show_cursor)
+        def _update(frac: float):
+            progress.progress(0.15 + frac * 0.85,
+                             text=f"Rendering & encoding video… "
+                                  f"{int(frac * 100)}%")
 
-        progress.progress(0.85, text="Encoding video…")
-        video_bytes = write_video_bytes(frames, fps)
+        video_bytes = render_and_encode_video(
+            line_rgb, colored_rgb, ordered, all_fillable_mask,
+            duration_sec, fps, show_cursor, progress_cb=_update)
 
         progress.progress(1.0, text="Done!")
         st.success(f"✅ Video ready — {len(regions)} regions, "
-                   f"{len(frames)/fps:.1f}s, {len(video_bytes)/1024:.0f} KB")
+                   f"{duration_sec:.0f}s, {len(video_bytes)/1024:.0f} KB")
 
         st.video(video_bytes)
         st.download_button(
