@@ -281,9 +281,18 @@ def render_and_encode_video(line_rgb: np.ndarray, colored_rgb: np.ndarray,
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
-    writer = imageio.get_writer(tmp_path, fps=fps, codec="libx264",
-                                format="FFMPEG", quality=8,
-                                macro_block_size=None)
+    # imageio's 0-10 "quality" scale maps to an ESTIMATED bitrate, which
+    # under-allocates bits for busy line-art detail (lace, foliage,
+    # patterns) and shows up as smeared/ghosted edges. -crf directly
+    # controls encoder quality regardless of content complexity — 18 is
+    # visually near-lossless. -preset slow spends more effort for the
+    # same size/quality tradeoff (fine for a one-off export, not a
+    # live stream).
+    writer = imageio.get_writer(
+        tmp_path, fps=fps, codec="libx264", format="FFMPEG",
+        macro_block_size=None,
+        output_params=["-crf", "18", "-preset", "slow"],
+    )
     try:
         for f in range(total_frames):
             progress = f / max(1, total_frames - 1)
