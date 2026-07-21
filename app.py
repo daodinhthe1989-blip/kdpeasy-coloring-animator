@@ -277,7 +277,12 @@ def render_and_encode_video(line_rgb: np.ndarray, colored_rgb: np.ndarray,
 
     canvas = line_rgb.copy()
     revealed_so_far = 0
-    cursor_radius = max(6, int(min(w, h) * 0.02))
+    cursor_arm = max(6, int(min(w, h) * 0.02))
+    # NOT a ring+dot: on character art, small round regions (eyes,
+    # nose, ears, buttons) are everywhere, and a ring+dot marker reads
+    # as an extra eye wherever it lands, at almost any size. A
+    # crosshair doesn't pattern-match to a facial feature at all.
+    cursor_color = (230, 30, 90)
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
@@ -306,10 +311,10 @@ def render_and_encode_video(line_rgb: np.ndarray, colored_rgb: np.ndarray,
             frame = canvas.copy()
             if show_cursor and revealed_so_far > 0:
                 cx, cy = ordered_regions[revealed_so_far - 1]["centroid"]
-                cv2.circle(frame, (cx, cy), cursor_radius,
-                          (255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
-                cv2.circle(frame, (cx, cy), max(2, cursor_radius // 3),
-                          (60, 60, 60), thickness=-1, lineType=cv2.LINE_AA)
+                cv2.line(frame, (cx - cursor_arm, cy), (cx + cursor_arm, cy),
+                         cursor_color, thickness=2, lineType=cv2.LINE_AA)
+                cv2.line(frame, (cx, cy - cursor_arm), (cx, cy + cursor_arm),
+                         cursor_color, thickness=2, lineType=cv2.LINE_AA)
             writer.append_data(frame)
             if progress_cb and f % 5 == 0:
                 progress_cb(f / grand_total)
